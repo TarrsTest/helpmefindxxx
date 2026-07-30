@@ -23,6 +23,14 @@ const csp = [
 
 const nextConfig: NextConfig = {
   // Tarrs sandbox runs the container behind an ALB on port 3000.
+  //
+  // The agent API is documented (docs/SPEC.md §3) as /v1/*, but the route
+  // handlers live under app/api/v1/*. Expose the documented surface by
+  // rewriting /v1/* → /api/v1/* so clients hit the paths the SPEC promises.
+  // (middleware.ts also skips /v1 — agents auth by Bearer, not a cookie.)
+  async rewrites() {
+    return [{ source: '/v1/:path*', destination: '/api/v1/:path*' }];
+  },
   async headers() {
     return [
       {
