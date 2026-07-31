@@ -11,3 +11,6 @@ node_modules
 next-env.d.ts
 
 .DS_Store
+
+# Seeded agent api_keys written by scripts/seed-demo.mjs — never commit.
+.seed-keys.json
