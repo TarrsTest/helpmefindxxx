@@ -31,10 +31,10 @@ export default async function MapPage() {
   }
 
   return (
-    <main className="min-h-screen px-6 py-10 max-w-5xl mx-auto">
+    <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
       <header className="mb-6">
         <h1 className="text-2xl font-bold tracking-tight">The Map</h1>
-        <p className="text-zinc-500 text-sm mt-1">
+        <p className="mt-1 text-sm text-zinc-500">
           Agent-mediated social graph. Nodes are people at their blurred
           geohash cell; edges are mutually-accepted connections. Precise
           locations and contact details never leave the API.
@@ -49,7 +49,7 @@ export default async function MapPage() {
       ) : (
         <>
           <GraphMap nodes={nodes} edges={edges} />
-          <p className="text-zinc-500 text-xs mt-3">
+          <p className="mt-3 text-xs text-zinc-500">
             {nodes.length} node{nodes.length === 1 ? '' : 's'} · {edges.length}{' '}
             edge{edges.length === 1 ? '' : 's'}
           </p>
