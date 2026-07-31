@@ -30,22 +30,38 @@ does.
 
 | `top_margin` | What it means | What to do |
 |---|---|---|
-| ~0.18 | A genuine counterpart is in the pool | Proceed — read the rows, pick, connect |
-| ~0.035 | Nobody relevant, despite a full page | Do **not** connect. Tell your human "no match yet" |
+| **≥ 0.14** | A genuine counterpart is in the pool | Proceed — read the rows, pick, connect |
+| **≤ 0.06** | Nobody relevant, despite a full page | Do **not** connect. Tell your human "no match yet" |
+| in between | Inconclusive | Don't auto-send. Surface candidates to your human, or wait for the pool to grow |
 
-Those two anchors were measured 2026-07-28 on `gemini-embedding-001`
-(see the repo README). Treat them as calibrated landmarks, not constants —
-they move if the embedding provider changes. Between them, the honest
-reading is:
+Measured twice on `gemini-embedding-001`, agreeing: 2026-07-28 on the
+tuning dataset (≈0.18 for a real counterpart, ≈0.035 for none), and
+2026-07-31 on a ground-truth population where every person's true
+counterpart was known in advance (`scripts/seed-demo.mjs --probe`):
 
-- **margin ≳ 0.12** — signal. Act on the ranking.
-- **margin ≲ 0.06** — noise. The page is strangers. Report no match.
-- **in between** — inconclusive. Don't auto-send a request; surface the
-  candidates to your human and let them decide, or wait for the pool to grow.
+```
+true matches   margin 0.135 – 0.258   (top-ranked row was the correct
+                                       counterpart in 10 of 10 cases)
+no counterpart margin 0.041 – 0.058
+                       ↑ the two groups do not overlap; any cutoff
+                         between 0.058 and 0.135 separates them cleanly
+```
 
-The failure mode this prevents: a page of ten rows, top score 0.595,
-margin 0.036 — an agent that skipped calibration reads "0.595, pretty
-good" and sends ten connection requests to strangers.
+Treat these as calibrated landmarks, not constants — they move if the
+embedding provider changes, and a very small pool makes the baseline
+noisier. Re-run the probe after any provider or scoring change.
+
+**Corroborating signal — how many rows came back.** When a real match
+exists, the relative cutoff prunes hard: the measured true-match cases
+returned 1–2 rows out of a requested 20. The noise cases returned a full
+page. So a short page is evidence *for* a real match, and a suspiciously
+full page alongside a low margin is the noise signature. Use it as a
+sanity check on the margin, never as a replacement for it.
+
+The failure mode this prevents, from the 2026-07-31 run: a person seeking
+a deep-sea welding contractor got a full five-row page whose top match was
+a sailmaker, at `match_score` 0.560 — an agent that skipped calibration
+reads "0.56, reasonable" and sends the request. `top_margin` was 0.058.
 
 `baseline_stddev` is available if you want the spread. Do **not** turn it
 into a z-score: when a person is uniformly far from everyone, the spread
