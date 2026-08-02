@@ -57,8 +57,8 @@ Specifically, none of the following is exercised:
 |---|---|---|
 | Bearer authentication | `tests/auth.test.ts` | ✅ done — 6 cases × all 6 authenticated handlers |
 | Contact gating | `tests/contact.test.ts` | ✅ done — 4 connection states + 2 leak paths |
+| Pagination & anchor | `tests/pagination.test.ts` | ✅ done — cursor invariants + cutoff anchor |
 | Rate limiting | — | ❌ not written |
-| Pagination | — | ❌ not written |
 
 `tests/auth.test.ts` covers the auth gate only: absent header, header without
 the `Bearer` prefix, `Bearer` with no key, a well-formed but forged key, a
@@ -86,6 +86,26 @@ The expired state is set by a scoped `UPDATE` on the one row under test rather
 than by calling `expire_stale_connections()`, which sweeps every pending row
 older than the cutoff and would expire other people's connections on this
 shared database.
+
+`tests/pagination.test.ts` covers cursor paging and the relative cutoff's
+anchor: no duplicate `user_id` across pages (the regression for migration
+006), nobody omitted, the cursor terminates, results descend by score, the
+paginated walk equals the unpaginated response, and `calibration.top_score`
+stays the page-1 anchor instead of being recomputed per page.
+
+**Assert contracts, not score values.** Absolute scores depend on the
+embedding provider, on the vectors, and — for `calibration.baseline` — on
+whoever else is in the shared database. A test pinned to `0.8241` fails on a
+provider swap or a reembed while the contract is perfectly intact. Where these
+tests touch scores at all it is relational: `a >= b`, or "within cutoff of the
+anchor".
+
+The stub vectors are `e0 + small noise`, chosen so fixture users score ~0.82
+against each other with a spread in the third decimal — distinct, strictly
+orderable, and full-mantissa floats of the kind that exposed the 006 bug —
+while anyone else in the database sits near 0 and is dropped by the cutoff.
+That isolation is what lets the "omits nobody" assertion mean something
+without counting other people's rows.
 
 ## Conventions for new tests
 
