@@ -56,9 +56,9 @@ Specifically, none of the following is exercised:
 | Group | File | State |
 |---|---|---|
 | Bearer authentication | `tests/auth.test.ts` | ✅ done — 6 cases × all 6 authenticated handlers |
+| Contact gating | `tests/contact.test.ts` | ✅ done — 4 connection states + 2 leak paths |
 | Rate limiting | — | ❌ not written |
 | Pagination | — | ❌ not written |
-| Contact exchange | — | ❌ not written |
 
 `tests/auth.test.ts` covers the auth gate only: absent header, header without
 the `Bearer` prefix, `Bearer` with no key, a well-formed but forged key, a
@@ -69,7 +69,23 @@ new authenticated route and it is NOT covered until you add it to the
 
 For the valid-key case the tests assert only "not 401" — the gate opened.
 Whether the endpoint then does the right thing is the business of the group
-that covers it, which for three of the four is still nothing.
+that covers it, which for two of the four is still nothing.
+
+`tests/contact.test.ts` covers the contact gate (SPEC §4/§7.3) across all four
+connection states — pending, declined, expired hide contact from **both**
+parties; accepted exposes it to both — plus the two incidental leak paths,
+`GET /v1/recommendations` and `GET /v1/graph`.
+
+Every test user's contact is an address at a marker domain that exists nowhere
+else, so each assertion is a substring check over the entire serialised
+response and catches a leak through *any* field, not just one named `contact`.
+The accepted case asserts the marker **is** present, so the negative checks
+can't pass merely because the marker never appears.
+
+The expired state is set by a scoped `UPDATE` on the one row under test rather
+than by calling `expire_stale_connections()`, which sweeps every pending row
+older than the cutoff and would expire other people's connections on this
+shared database.
 
 ## Conventions for new tests
 
