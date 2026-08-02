@@ -58,7 +58,7 @@ Specifically, none of the following is exercised:
 | Bearer authentication | `tests/auth.test.ts` | ✅ done — 6 cases × all 6 authenticated handlers |
 | Contact gating | `tests/contact.test.ts` | ✅ done — 4 connection states + 2 leak paths |
 | Pagination & anchor | `tests/pagination.test.ts` | ✅ done — cursor invariants + cutoff anchor |
-| Rate limiting | — | ❌ not written |
+| Rate limiting | `tests/rateLimit.test.ts` | ✅ done — threshold, window bucket, per-key isolation |
 
 `tests/auth.test.ts` covers the auth gate only: absent header, header without
 the `Bearer` prefix, `Bearer` with no key, a well-formed but forged key, a
@@ -106,6 +106,33 @@ orderable, and full-mantissa floats of the kind that exposed the 006 bug —
 while anyone else in the database sits near 0 and is dropped by the cutoff.
 That isolation is what lets the "omits nobody" assertion mean something
 without counting other people's rows.
+
+`tests/rateLimit.test.ts` covers the per-key fixed window: requests up to the
+limit pass, the next one is 429, an exhausted key does not affect any other
+key, a counter from an earlier window is ignored, the count starts fresh once
+the window rolls over, and the counter is stored in the correctly aligned
+bucket.
+
+**Time is controlled through state, never the clock.** The limiter buckets by
+`floor(now / window) * window`, so "the window rolled over" is entirely
+expressed by which bucket a row sits in — the tests move rows between buckets
+instead of sleeping. A sleep-based test would have to exhaust the limit inside
+a window narrow enough to wait out, and a few database round trips straddling
+that boundary is precisely the flake worth refusing. `vi.useFakeTimers` is no
+help: the clock that matters is Postgres's `now()`, not the test process's.
+
+`RATE_LIMIT` and `RATE_WINDOW_SECONDS` are read at import time, so the file
+stubs the env and calls `vi.resetModules()` **before** dynamically importing
+the route. One test asserts the stub took effect — otherwise a broken stub
+falls back to 60/minute and every over-limit case fails looking like a
+limiter bug rather than a harness bug.
+
+The bucket-alignment test is the one deliberately white-box assertion in the
+suite. It exists because a limiter that dropped the bucket arithmetic and
+pinned every counter to one constant timestamp still counts correctly and
+still passes every black-box case here — it simply never rolls over. Nothing
+observable through the API distinguishes that within a single window, so the
+storage layout has to be asserted directly.
 
 ## Conventions for new tests
 
