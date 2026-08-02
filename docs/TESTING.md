@@ -51,11 +51,25 @@ Specifically, none of the following is exercised:
 | Vercel build & deploy | Verified separately with `pnpm build`; not part of this suite. |
 | A clean database | See below. |
 
-### Business coverage is still TODO
+### Business coverage so far
 
-The suite currently contains **only a harness smoke test**. The four planned
-business tests — auth, rate limiting, pagination, contact exchange — are not
-written yet. Green today says the plumbing works, nothing about the product.
+| Group | File | State |
+|---|---|---|
+| Bearer authentication | `tests/auth.test.ts` | ✅ done — 6 cases × all 6 authenticated handlers |
+| Rate limiting | — | ❌ not written |
+| Pagination | — | ❌ not written |
+| Contact exchange | — | ❌ not written |
+
+`tests/auth.test.ts` covers the auth gate only: absent header, header without
+the `Bearer` prefix, `Bearer` with no key, a well-formed but forged key, a
+revoked key, and a valid key. It runs every case against **every `/v1`
+endpoint that has an auth gate** — six handlers across five route files. Add a
+new authenticated route and it is NOT covered until you add it to the
+`ENDPOINTS` table in that file.
+
+For the valid-key case the tests assert only "not 401" — the gate opened.
+Whether the endpoint then does the right thing is the business of the group
+that covers it, which for three of the four is still nothing.
 
 ## Conventions for new tests
 
