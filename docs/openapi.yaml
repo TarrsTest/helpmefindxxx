@@ -1,0 +1,919 @@
+openapi: 3.1.0
+
+info:
+  title: helpmefind agent API
+  version: 0.1.0
+  summary: Agent-mediated social graph — bidirectional semantic matching over an HTTP API.
+  description: |
+    People do not browse this product; their agents call this API on their
+    behalf. The API *is* the product. The only human-facing surface is the map
+    at `/map`, which is not part of this document.
+
+    ## Scope of this document
+
+    This file describes the **contract**: paths, parameters, request and
+    response shapes, and status codes. It deliberately does not describe
+    *judgment* — when a match is worth acting on, when to hold back, what to
+    show a human. That guidance lives in `skills/helpmefind/SKILL.md` and
+    cannot be expressed here: OpenAPI can say `top_margin` is a number, not
+    that acting below a certain value is a mistake.
+
+    Product rationale, the scoring formula and open design questions live in
+    `docs/SPEC.md`.
+
+    ## Paths
+
+    The public surface is `/v1/*`. Handlers live at `app/api/v1/*` and are
+    exposed under `/v1` by a rewrite in `next.config.ts` — call `/v1`, never
+    `/api/v1`. That rewrite is verified separately by `pnpm test:rewrite`;
+    the main test suite calls handlers in-process and cannot see it.
+
+    ## Authentication
+
+    Every endpoint except `POST /v1/users` requires a Bearer token. Agent
+    endpoints take the `api_key` issued at registration; the single admin
+    endpoint takes a separate operator token and is tagged `admin`.
+
+    Keys are stored only as a SHA-256 hash. The plaintext is returned exactly
+    once, by `POST /v1/users`.
+
+    ## Rate limiting
+
+    Requests are counted per api_key in a fixed window — 60 requests per 60
+    seconds by default, both configurable per deployment. Exceeding the window
+    returns `429`. **No `Retry-After` header is sent**; wait out the window.
+
+    Registration (`POST /v1/users`) is not rate limited, because it has no key
+    to count against.
+
+    ## Reading `match_score`
+
+    `match_score` orders candidates and nothing else. It is not a probability,
+    not a percentage, and not comparable across embedding providers: two people
+    with nothing in common still score around 0.55–0.62. Use
+    `calibration.top_margin` to judge whether a result set contains anyone
+    relevant at all, and see the agent skill for the thresholds.
+
+servers:
+  - url: https://helpmefindxxx.vercel.app
+    description: Production
+  - url: http://localhost:3000
+    description: Local dev server
+
+tags:
+  - name: agent
+    description: |
+      Called by an agent acting for one person, authenticated with that
+      person's api_key.
+  - name: admin
+    description: |
+      Operator-only maintenance. Separate credential (`ADMIN_TOKEN`), not an
+      api_key, and disabled entirely when that variable is unset.
+
+security:
+  - agentApiKey: []
+
+paths:
+  /v1/users:
+    post:
+      tags: [agent]
+      operationId: registerUser
+      summary: Register a person and issue their agent's api_key
+      description: |
+        Bootstrap call, made once per person. Returns the plaintext `api_key`
+        **once** — only its hash is stored, and it cannot be recovered later.
+
+        `lat`/`lng` are optional and are encoded to a geohash on the server.
+        Precise coordinates never leave the database; anything the API returns
+        is blurred to the person's `loc_precision` cell.
+
+        `contact` is stored as-is and is withheld until a mutual accept.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              minimal:
+                summary: Handle only
+                value:
+                  handle: ada
+              located:
+                summary: With contact and a coarse location
+                value:
+                  handle: ada
+                  contact:
+                    email: ada@example.com
+                  lat: 51.5
+                  lng: -0.12
+                  loc_precision: 5
+      responses:
+        '201':
+          description: Registered. `api_key` is shown here and never again.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+              example:
+                user_id: 9f1c1e2a-7d34-4a55-9c1e-2b0f7a8d5e11
+                handle: ada
+                api_key: sk_0123456789abcdef0123456789abcdef0123456789abcdef
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: |
+            `handle already taken` — handles are unique across the graph.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: handle already taken
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/profile:
+    post:
+      tags: [agent]
+      operationId: setProfile
+      summary: Report who this person is and who they are looking for
+      description: |
+        Both fields are natural language. Writing them re-embeds the profile
+        synchronously, so the call takes as long as the embedding provider
+        does. Call it again whenever what the person offers or wants changes.
+
+        A person with no profile never appears in anyone's recommendations and
+        receives none.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileRequest'
+            example:
+              self: Systems programmer, ten years on databases, into type theory.
+              seeking: A designer who likes maths and wants to build a dev tool.
+      responses:
+        '200':
+          description: Stored and re-embedded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ok'
+              example:
+                ok: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/recommendations:
+    get:
+      tags: [agent]
+      operationId: listRecommendations
+      summary: Ranked bidirectional matches for the calling person
+      description: |
+        Scored in both directions: how well each candidate fits what the caller
+        seeks, and how well the caller fits what that candidate seeks. People
+        the caller already has a connection with are excluded.
+
+        Two things shape the result set:
+
+        - **A relative cutoff.** Candidates scoring far below the best match
+          are dropped. The comparison is relative because `match_score` has no
+          meaningful zero. The anchor is the top score of the first page and
+          travels in the cursor, so later pages are measured against the same
+          bar.
+        - **A calibration block.** The cutoff cannot tell you that *everything*
+          is irrelevant — "far below the top" says nothing when the top is
+          itself noise. `calibration.top_margin` compares the best match
+          against a random stranger, which is the signal that does.
+
+        A full page is returned whether or not anybody relevant exists. Row
+        count is not evidence of quality; `top_margin` is.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Rows per page. Values outside the range are clamped, not rejected.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            Opaque continuation token from `next_cursor`. Treat it as a black
+            box: it encodes the keyset position *and* the cutoff anchor, and
+            parsing or constructing one will break pagination.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of matches, plus calibration for the whole result set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecommendationsResponse'
+              example:
+                recommendations:
+                  - user_id: 4c2b9a71-8e60-4c0e-9b0a-1d3f5a7c9e02
+                    handle: grace
+                    match_score: 0.806559991791
+                    reason: They fit what you're seeking (0.82); you fit what they're seeking (0.80).
+                calibration:
+                  baseline: 0.630395877427939
+                  baseline_stddev: 0.0676411901493141
+                  sample_size: 9
+                  top_score: 0.806559991791
+                  top_margin: 0.176164114363061
+                  cutoff: 0.15
+                next_cursor: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/connections:
+    get:
+      tags: [agent]
+      operationId: listConnections
+      summary: Every connection involving the calling person
+      description: |
+        Includes all states, in both directions, newest first. `contact` is
+        populated only on `accepted` rows — see the schema.
+      responses:
+        '200':
+          description: All connections involving the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionsResponse'
+              example:
+                connections:
+                  - id: 6e81544c-9670-4f07-bcf2-9b1a8c57318c
+                    direction: outgoing
+                    status: accepted
+                    match_score: 0.806559991791
+                    other_id: 4c2b9a71-8e60-4c0e-9b0a-1d3f5a7c9e02
+                    other_handle: grace
+                    contact:
+                      email: grace@example.com
+                    created_at: '2026-07-28T19:41:06.337872+00:00'
+                    responded_at: '2026-07-28T19:44:12.118004+00:00'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    post:
+      tags: [agent]
+      operationId: createConnection
+      summary: Ask to connect with someone
+      description: |
+        Creates a `pending` request from the caller to `target_id`. Only one
+        live connection may exist per pair, in either direction.
+
+        Pending requests expire after a configured number of days (7 by
+        default) and can no longer be responded to once they do.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateConnectionRequest'
+            example:
+              target_id: 4c2b9a71-8e60-4c0e-9b0a-1d3f5a7c9e02
+      responses:
+        '201':
+          description: Request created, awaiting the other side.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateConnectionResponse'
+              example:
+                connection:
+                  id: 6e81544c-9670-4f07-bcf2-9b1a8c57318c
+                  status: pending
+                  match_score: 0.806559991791
+                  created_at: '2026-07-28T19:41:06.337872+00:00'
+        '400':
+          description: |
+            `target_id is required`, or `cannot connect to yourself`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: target_id is required
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: '`target not found` — no user with that id.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: target not found
+        '409':
+          description: |
+            `connection already exists` — a connection between this pair is
+            already on record, in either direction and in any state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: connection already exists
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/connections/{id}/respond:
+    post:
+      tags: [agent]
+      operationId: respondToConnection
+      summary: Accept or decline a pending request
+      description: |
+        Only the **target** of a pending request may respond, and only while it
+        is still pending.
+
+        On `accept` the connection becomes an edge on the map and contacts are
+        exchanged: this response carries the requester's contact, and each side
+        can then read the other's from `GET /v1/connections`. On `decline`
+        contact is never exposed to either party.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Connection id.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RespondRequest'
+            example:
+              action: accept
+      responses:
+        '200':
+          description: |
+            Recorded. `contact` is the requester's on accept, `null` on decline.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespondResponse'
+              example:
+                id: 6e81544c-9670-4f07-bcf2-9b1a8c57318c
+                status: accepted
+                contact:
+                  email: ada@example.com
+        '400':
+          description: "`action must be 'accept' or 'decline'`."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: action must be 'accept' or 'decline'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: |
+            `only the target can respond` — the requester cannot answer their
+            own request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: only the target can respond
+        '404':
+          description: '`connection not found`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: connection not found
+        '409':
+          description: |
+            Already resolved — the message names the current state, e.g.
+            `connection is already accepted`, `declined` or `expired`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: connection is already declined
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/graph:
+    get:
+      tags: [agent]
+      operationId: getGraph
+      summary: Blurred map data — nodes and accepted edges
+      description: |
+        Feeds the map at `/map`. Nodes carry a handle and a **blurred** cell,
+        never precise coordinates; people without a location are absent, and
+        edges to them are dropped rather than left dangling. Only `accepted`
+        connections appear.
+
+        Contact is never part of this payload, for anyone, in any state.
+      responses:
+        '200':
+          description: The whole graph.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Graph'
+              example:
+                nodes:
+                  - id: 4c2b9a71-8e60-4c0e-9b0a-1d3f5a7c9e02
+                    handle: grace
+                    geohash: gcpvj
+                    lat: 51.52587890625
+                    lng: -0.10986328125
+                edges:
+                  - source: 9f1c1e2a-7d34-4a55-9c1e-2b0f7a8d5e11
+                    target: 4c2b9a71-8e60-4c0e-9b0a-1d3f5a7c9e02
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/admin/reembed:
+    post:
+      tags: [admin]
+      operationId: reembedProfiles
+      summary: Recompute every profile embedding with the current provider
+      description: |
+        Operator maintenance, not an agent call.
+
+        Embedding providers occupy different vector spaces, so rows embedded
+        under a previous provider stop matching correctly the moment the
+        configured provider changes. This backfills every profile that has text
+        into one consistent space. Idempotent, and safe to re-run.
+
+        Runs synchronously over the whole table and can take minutes. Not rate
+        limited — it does not authenticate with an api_key.
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: Backfill complete.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReembedResponse'
+              example:
+                ok: true
+                provider: gemini
+                reembedded: 42
+        '401':
+          description: '`invalid admin token`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid admin token
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: |
+            `admin endpoint disabled (ADMIN_TOKEN unset)` — the endpoint is
+            closed rather than open when no operator token is configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: admin endpoint disabled (ADMIN_TOKEN unset)
+
+components:
+  securitySchemes:
+    agentApiKey:
+      type: http
+      scheme: bearer
+      description: |
+        The `api_key` returned once by `POST /v1/users`, sent as
+        `Authorization: Bearer sk_…`. Stored server-side as a SHA-256 hash.
+        Revoking a key is an operator action; a revoked key is rejected exactly
+        like an unknown one.
+    adminToken:
+      type: http
+      scheme: bearer
+      description: |
+        The deployment's `ADMIN_TOKEN`, sent as `Authorization: Bearer …`. A
+        separate credential from any api_key, used only by the `admin` tag.
+
+  responses:
+    BadRequest:
+      description: Malformed body or a missing required field.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: invalid json body
+    Unauthorized:
+      description: |
+        Missing, malformed, unknown or revoked credential. `missing bearer
+        token` means the `Authorization` header could not be parsed; `invalid
+        api key` means it parsed but resolved to nothing usable. The two are
+        never distinguished further — an unknown key and a revoked key look
+        identical from outside.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            malformedHeader:
+              value:
+                error: missing bearer token
+            badKey:
+              value:
+                error: invalid api key
+    RateLimited:
+      description: |
+        Per-key fixed window exhausted. **No `Retry-After` header is sent** —
+        wait for the current window to end (60 seconds by default).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: rate limit exceeded
+    InternalError:
+      description: |
+        Unhandled server error. The message is deliberately opaque; details are
+        logged server-side only.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal error
+
+  schemas:
+    Error:
+      type: object
+      description: Every non-2xx response in this API has this shape.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          description: Human-readable, stable enough to match on but not an enum.
+
+    Ok:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+
+    Contact:
+      type: object
+      description: |
+        Free-form contact details, stored exactly as supplied — the server does
+        not validate or normalise them, so no shape is guaranteed. Withheld
+        until a mutual accept.
+      additionalProperties: true
+      examples:
+        - email: ada@example.com
+          telegram: '@ada'
+
+    RegisterRequest:
+      type: object
+      required: [handle]
+      properties:
+        handle:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: |
+            Unique across the graph. Trimmed, and truncated to 64 characters
+            rather than rejected.
+        contact:
+          $ref: '#/components/schemas/Contact'
+        lat:
+          type: number
+          description: |
+            Latitude. Used only when `lng` is also present and both are finite;
+            otherwise the person simply has no location.
+        lng:
+          type: number
+          description: Longitude. See `lat`.
+        loc_precision:
+          type: integer
+          minimum: 1
+          maximum: 9
+          default: 5
+          description: |
+            Geohash length this person's position is blurred to before it is
+            shown to anyone. Lower is coarser — 5 is roughly city scale. Values
+            outside the range are clamped.
+
+    RegisterResponse:
+      type: object
+      required: [user_id, handle, api_key]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        handle:
+          type: string
+        api_key:
+          type: string
+          description: |
+            Plaintext key, `sk_` followed by 48 hex characters. **Returned
+            once.** The server keeps only a hash and cannot re-issue it.
+
+    ProfileRequest:
+      type: object
+      required: [self, seeking]
+      properties:
+        self:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: Who this person is, in natural language. Truncated, not rejected.
+        seeking:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: Who they want to meet, in natural language.
+
+    Recommendation:
+      type: object
+      required: [user_id, handle, match_score, reason]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        handle:
+          type: string
+        match_score:
+          type: number
+          description: |
+            Ranking signal only — not a probability and not comparable across
+            embedding providers. Unrelated people still score ~0.55–0.62. Use
+            `calibration.top_margin` to judge relevance.
+        reason:
+          type: string
+          description: Human-readable summary of the two directional similarities.
+
+    Calibration:
+      type: object
+      description: |
+        How this result set compares to chance. Present on every page, and
+        describing the whole result set rather than the current page.
+      required: [baseline, baseline_stddev, sample_size, top_score, top_margin, cutoff]
+      properties:
+        baseline:
+          type: [number, 'null']
+          description: |
+            Mean score of the caller against a random sample of profiles — what
+            a stranger scores. `null` when the caller has no profile.
+        baseline_stddev:
+          type: [number, 'null']
+          description: |
+            Spread of that sample. Provided for callers who want it; note that
+            `top_margin / baseline_stddev` is NOT a significance test — when
+            someone is uniformly far from everyone the spread collapses and the
+            ratio looks confident on pure noise.
+        sample_size:
+          type: integer
+          description: Profiles scored to produce the baseline.
+        top_score:
+          type: [number, 'null']
+          description: |
+            Best match in the whole result set, and the anchor the relative
+            cutoff is measured from. Identical on every page.
+        top_margin:
+          type: [number, 'null']
+          description: |
+            `top_score - baseline`. **The signal.** Near zero means nobody
+            relevant is in the pool, however many rows came back. Thresholds
+            live in `skills/helpmefind/SKILL.md`.
+        cutoff:
+          type: [number, 'null']
+          description: |
+            How far below `top_score` a candidate may score before it is
+            dropped. `null` when relative cutoff is disabled.
+
+    RecommendationsResponse:
+      type: object
+      required: [recommendations, calibration, next_cursor]
+      properties:
+        recommendations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recommendation'
+          description: Descending by `match_score`.
+        calibration:
+          $ref: '#/components/schemas/Calibration'
+        next_cursor:
+          type: [string, 'null']
+          description: |
+            Pass back as `cursor` for the next page. `null` on the last page —
+            which includes the case where the cutoff truncated it.
+
+    ConnectionStatus:
+      type: string
+      enum: [pending, accepted, declined, expired]
+      description: |
+        `pending` awaits the target's response · `accepted` is a live edge with
+        contacts exchanged · `declined` is closed · `expired` was never answered
+        in time. Only `accepted` is terminal in a useful sense; the other three
+        all withhold contact.
+
+    ConnectionSummary:
+      type: object
+      required:
+        [id, direction, status, match_score, other_id, other_handle, contact, created_at, responded_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [outgoing, incoming]
+          description: '`outgoing` if the caller initiated it.'
+        status:
+          $ref: '#/components/schemas/ConnectionStatus'
+        match_score:
+          type: [number, 'null']
+          description: Score at the time the request was made. `null` if it could not be computed.
+        other_id:
+          type: string
+          format: uuid
+          description: The other party.
+        other_handle:
+          type: [string, 'null']
+        contact:
+          oneOf:
+            - $ref: '#/components/schemas/Contact'
+            - type: 'null'
+          description: |
+            The other party's contact details — **populated only when `status`
+            is `accepted`**. `null` in every other state, including `expired`,
+            and including for the person who sent the request.
+        created_at:
+          type: string
+          format: date-time
+        responded_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the target answered. `null` while pending.
+
+    ConnectionsResponse:
+      type: object
+      required: [connections]
+      properties:
+        connections:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectionSummary'
+          description: Newest first.
+
+    CreateConnectionRequest:
+      type: object
+      required: [target_id]
+      properties:
+        target_id:
+          type: string
+          format: uuid
+          description: The person to ask. Must not be the caller.
+
+    CreateConnectionResponse:
+      type: object
+      required: [connection]
+      properties:
+        connection:
+          type: object
+          required: [id, status, match_score, created_at]
+          properties:
+            id:
+              type: string
+              format: uuid
+            status:
+              $ref: '#/components/schemas/ConnectionStatus'
+            match_score:
+              type: [number, 'null']
+            created_at:
+              type: string
+              format: date-time
+
+    RespondRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [accept, decline]
+
+    RespondResponse:
+      type: object
+      required: [id, status, contact]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [accepted, declined]
+        contact:
+          oneOf:
+            - $ref: '#/components/schemas/Contact'
+            - type: 'null'
+          description: |
+            The requester's contact details on `accept`; `null` on `decline`.
+            Also `null` on accept if the requester never supplied any.
+
+    GraphNode:
+      type: object
+      required: [id, handle, geohash, lat, lng]
+      properties:
+        id:
+          type: string
+          format: uuid
+        handle:
+          type: string
+        geohash:
+          type: string
+          description: Blurred cell, truncated to the person's `loc_precision`.
+        lat:
+          type: number
+          description: Centre of the blurred cell — not the person's position.
+        lng:
+          type: number
+          description: See `lat`.
+
+    GraphEdge:
+      type: object
+      required: [source, target]
+      properties:
+        source:
+          type: string
+          format: uuid
+          description: The requester.
+        target:
+          type: string
+          format: uuid
+
+    Graph:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphNode'
+          description: People with a location. Those without one are absent entirely.
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/GraphEdge'
+          description: |
+            Accepted connections only, and only where both endpoints are
+            present in `nodes`.
+
+    ReembedResponse:
+      type: object
+      required: [ok, provider, reembedded]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        provider:
+          type: string
+          description: Embedding provider the backfill ran with, e.g. `gemini`.
+        reembedded:
+          type: integer
+          description: Profiles rewritten.

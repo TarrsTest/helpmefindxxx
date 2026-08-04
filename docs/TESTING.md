@@ -43,13 +43,49 @@ Specifically, none of the following is exercised:
 
 | Not covered | Why it matters |
 |---|---|
-| The `/v1/*` → `/api/v1/*` rewrite | Tests import `app/api/v1/…` directly. The public path the SPEC promises (`/v1`) lives in `next.config.ts` and is never resolved here. A broken rewrite = green tests, 404 in production. |
+| The `/v1/*` → `/api/v1/*` rewrite | Tests import `app/api/v1/…` directly, so the public path the SPEC promises is never resolved by `pnpm test`. Covered instead by `pnpm test:rewrite`, which is a **separate command** — see below. |
 | `middleware.ts` | Excluded by design for `/v1`, but the human pages (`/`, `/map`, `/dashboard`) do run through it. None of that is tested. |
 | RLS policies | Tests use the **service-role** client, which BYPASSES RLS. A policy that wrongly exposes data cannot fail these tests. |
 | Security headers / CSP | `next.config.ts` `headers()` is build/serve-time only. |
 | The map UI | `/map` and `components/GraphMap.tsx` have no tests. |
 | Vercel build & deploy | Verified separately with `pnpm build`; not part of this suite. |
 | A clean database | See below. |
+
+### The one thing checked outside `pnpm test`
+
+```bash
+pnpm test:rewrite
+```
+
+`tests/contract/rewrite.test.ts` makes real HTTP requests against a deployed
+server and asserts that every path `docs/openapi.yaml` documents actually
+resolves — that the `/v1/*` → `/api/v1/*` rewrite in `next.config.ts` is
+working. It is the only check standing between a broken rewrite and a 404 in
+production, because the in-process suite is structurally blind to it.
+
+Notes on how it is wired, all deliberate:
+
+- **It is not part of `pnpm test`.** `vitest.config.mts` excludes
+  `tests/contract/**`; the check has its own `vitest.contract.config.mts`. A
+  glob change cannot sweep it into the default run, and the default run stays
+  hermetic and offline.
+- **It does not skip when there is no server.** If the target is unreachable
+  every case fails with an explanatory error. A check that quietly disappears
+  when the environment is inconvenient is how coverage goes to zero without
+  anyone noticing.
+- **It needs no credentials.** Every request is an unauthenticated GET, so it
+  writes nothing and can run in CI without secrets. It does not load
+  `tests/setup.ts`.
+- **The path list is read out of `docs/openapi.yaml`,** not duplicated, so
+  documenting a new endpoint automatically probes it.
+- Default target is the production deployment; override with
+  `REWRITE_BASE_URL` (e.g. `http://localhost:3000` with `pnpm dev` running).
+
+Three things are asserted: every documented path is not a 404; `GET /v1/graph`
+returns exactly `401 {"error":"missing bearer token"}`, proving a request
+travels rewrite → handler → `lib/api/auth.ts`; and an undocumented path still
+404s, which is the control that stops a catch-all from satisfying everything
+above.
 
 ### Business coverage so far
 

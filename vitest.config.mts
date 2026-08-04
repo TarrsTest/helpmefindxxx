@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // Tests call the /v1 route handlers IN-PROCESS — no dev server. That works
 // because agent auth lives in lib/api/auth.ts (called at the top of every
@@ -15,6 +15,10 @@ export default defineConfig({
     environment: 'node',
     setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.test.ts'],
+    // tests/contract/** needs a real deployment and real HTTP. It runs on its
+    // own via `pnpm test:rewrite` (vitest.contract.config.mts) so that this
+    // suite stays hermetic and offline.
+    exclude: [...configDefaults.exclude, 'tests/contract/**'],
     // The suite talks to the SHARED dev Supabase. Running files in parallel
     // would interleave writes from different tests against one database, so
     // keep it serial until (if ever) each test owns an isolated schema.
