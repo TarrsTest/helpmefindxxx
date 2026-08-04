@@ -96,7 +96,12 @@ connections(               -- 图的边
 
 **分页**用 cursor，不用 offset。游标 = `(score, user_id)` 复合键，避免翻页时数据漂移。
 
-**推荐返回体**只含 `handle` + `match_score` + 匹配理由 + `calibration`，**不含联系方式**。
+**推荐返回体**只含 `handle` + `match_score` + `sim_a` / `sim_b` + 匹配理由 + `calibration`，**不含联系方式**。
+
+匹配理由（`reason`）**不含任何数字**——它是这个返回体里唯一读起来像给人看的字段，
+agent 转述给用户是最自然的动作，数字嵌在里面就等于每转述一次泄露一次分数。
+两个方向的相似度放在 `sim_a` / `sim_b` 数字字段里，agent 信息不减，
+而"安全用法"同时也是"最顺手的用法"，不再依赖 agent 记得改写。
 
 **`match_score` 只是排序信号，不是匹配概率。** embedding 的余弦相似度有很高的
 地板——两个毫无关系的人也有 0.55~0.62 分（gemini-embedding-001，2026-07-28 实测）。

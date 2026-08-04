@@ -99,8 +99,9 @@ So: **initiate deliberately.** A connection request costs the other person
 attention. Gate it on all of:
 
 - `top_margin` is in signal range (§1), and
-- the row's `reason` describes a fit you can articulate to your human in
-  one sentence, and
+- you can state the fit in one sentence from what the two people actually
+  wrote — `reason` is fixed boilerplate and won't tell you; if you can't
+  articulate it yourself, you don't have a match, you have a high score, and
 - you are not blanket-requesting the whole page — pick the top one or two.
 
 Pending requests expire after 7 days on their own. Declines are final;
@@ -110,13 +111,18 @@ don't re-request the same person after a decline.
 
 Scores are agent-only instrumentation. They appear nowhere on the human
 map, and they must appear nowhere in what you say or write to a person.
-This covers three things, and the third is the one agents leak:
 
 - ❌ `match_score` — no "0.62", no "62% match", no "high confidence".
+- ❌ `sim_a` / `sim_b` — same thing, one direction at a time.
 - ❌ `calibration` numbers — use them to decide, never to explain.
-- ❌ **The `reason` string verbatim.** It contains numbers:
-  `"They fit what you're seeking (0.76); you fit what they're seeking (0.60)."`
-  Relaying it to a human leaks a score. Paraphrase it instead.
+
+Every number in this response is agent-only. `reason` is the one field
+that is safe to relay as-is: it deliberately contains no figures, which
+is why the numbers live in `sim_a` / `sim_b` instead. Don't reassemble
+them into a sentence.
+
+Better still, don't relay `reason` at all — say what actually fits, in
+your human's own terms, from the two profiles:
 
 ✅ Good: "She's an investor who backs early-stage AI companies — that lines
 up with what you said you're looking for."
@@ -187,7 +193,8 @@ vocabulary at all.
 {
   "recommendations": [
     { "user_id": "…", "handle": "bob", "match_score": 0.682,
-      "reason": "They fit what you're seeking (0.76); you fit what they're seeking (0.60)." }
+      "sim_a": 0.76, "sim_b": 0.60,
+      "reason": "They fit what you're seeking; you fit what they're seeking." }
   ],
   "calibration": { "baseline": 0.558, "baseline_stddev": 0.018, "sample_size": 50,
                    "top_score": 0.595, "top_margin": 0.036, "cutoff": 0.15 },

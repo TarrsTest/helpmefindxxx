@@ -10,8 +10,8 @@ import { json, handle } from '@/lib/api/http';
 
 // GET /v1/recommendations — bidirectional-scored recommendations, cursor
 // paginated (SPEC §3). Cursor is the composite (score, user_id) so pages
-// don't drift (SPEC §3). Response carries handle + match_score + reason
-// only — NEVER contact (SPEC §3 / §4).
+// don't drift (SPEC §3). Response carries handle + match_score + sim_a /
+// sim_b + reason only — NEVER contact (SPEC §3 / §4).
 //   ?limit=20&cursor=<opaque>
 //
 // Two quality controls sit on top of the raw ranking:
@@ -57,9 +57,15 @@ const decodeCursor = (
   }
 };
 
-const reason = (simA: number, simB: number): string =>
-  `They fit what you're seeking (${simA.toFixed(2)}); ` +
-  `you fit what they're seeking (${simB.toFixed(2)}).`;
+// Deliberately carries NO numbers. `reason` is the one field in this
+// response shaped like human-readable prose, so an agent relaying it to
+// its human is the natural thing to do — and any score embedded here
+// would leak onto a human surface every time that happened. Keeping the
+// numbers in dedicated numeric fields (`sim_a` / `sim_b` below) means the
+// safe use is also the obvious one, instead of a rule agents must
+// remember to follow.
+const reason = (): string =>
+  `They fit what you're seeking; you fit what they're seeking.`;
 
 export const GET = (request: Request) =>
   handle(async () => {
@@ -125,7 +131,13 @@ export const GET = (request: Request) =>
         user_id: r.user_id,
         handle: r.handle,
         match_score: r.match_score,
-        reason: reason(r.sim_a, r.sim_b),
+        // The two directional similarities the score is built from, as
+        // numbers rather than prose: agents lose nothing versus reading
+        // them out of the old `reason` string, and gain not having to
+        // parse them back out of it.
+        sim_a: r.sim_a,
+        sim_b: r.sim_b,
+        reason: reason(),
       })),
       // How to read this: `top_margin` is the signal — how much better the
       // best match is than a random stranger. Near zero means this pool has
