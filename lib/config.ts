@@ -19,9 +19,31 @@ export const MATCH_HALF_LIFE_KM = process.env.MATCH_HALF_LIFE_KM
 // RELATIVE because absolute scores aren't meaningful: unrelated people still
 // score ~0.6 (see 005_score_baseline.sql), and the floor moves if the
 // embedding provider changes — but the *gap* between two scores in one
-// result set is comparable either way. Default 0.15 comes from the 2026-07-28
-// probe: intended matches sat 0.12-0.24 above the best unrelated candidate.
+// result set is comparable either way.
 // Set to 0 (or a negative number) to return the full ranked list.
+//
+// Re-validated 2026-08-04 on the 18-profile ground-truth population
+// (`node scripts/validate-cutoff.mjs`, w1 = w2 = 0.5). The true counterpart
+// ranked #1 for 10/10 probands, standing 0.1201-0.2452 above the best
+// impostor — reproducing the 0.12-0.24 range the original 2026-07-28 figure
+// came from, on an independent ground-truth set.
+//
+// KEPT AT 0.15 rather than tightened, deliberately. 0.15 sits INSIDE that
+// separation range, so on the two lowest-separation probands a stranger or
+// two rides along with the real match: a match page averages 2.6 rows at
+// 0.15 versus 1.0 at any cutoff below 0.1201. Tightening to ~0.12 would
+// isolate the true match perfectly on this dataset — and that is exactly why
+// it isn't done. Every proband here has exactly ONE counterpart and it always
+// ranked first, so this population is structurally unable to show what a
+// tight cutoff costs when someone has two plausible matches or the real one
+// lands at rank 2. Dropping a genuine match is a worse failure than showing
+// one extra stranger the agent can rank past, so the cutoff keeps its
+// headroom until a population with multi-counterpart people can measure it.
+//
+// What the measurement DOES pin down: noise pages stay full (17 rows) at
+// every cutoff at or above 0.08, while match pages stay short. Page length
+// is therefore itself a signal, and that property holds across the range —
+// it is not what the exact value is buying.
 export const MATCH_RELATIVE_CUTOFF = Number(
   process.env.MATCH_RELATIVE_CUTOFF ?? 0.15,
 );
@@ -30,6 +52,24 @@ export const MATCH_RELATIVE_CUTOFF = Number(
 // with each recommendations page. Bigger = steadier baseline, more work per
 // request; the pool is scored in one RPC, so this is one extra query either
 // way. Set to 0 to skip the baseline entirely.
+//
+// STILL UNVALIDATED, and not validatable yet — stated plainly so nobody
+// mistakes it for a measured number. `score_baseline` takes `limit
+// <sample>` over the whole profiles table, so once the sample reaches the
+// pool size it is scoring everyone and further increases change nothing.
+// Measured 2026-08-04 against the 18-profile dev pool:
+//
+//   requested   5      10      18      50     200
+//   actual      5      10      17      17      17
+//   baseline    0.5488 0.5328  0.5223  0.5223  0.5223
+//   stddev      0.0705 0.0545  0.0448  0.0448  0.0448
+//
+// 18, 50 and 200 are the same measurement. Whether 50 is the right number
+// is a question about how fast the baseline converges in a pool of
+// thousands, and it cannot be answered by a pool of 18 — it needs a filler
+// population several times larger than the sample, which costs one
+// embedding call per profile. Until then 50 is a guess that is cheap and
+// has not misbehaved, not a validated default.
 export const MATCH_BASELINE_SAMPLE = Number(
   process.env.MATCH_BASELINE_SAMPLE ?? 50,
 );
