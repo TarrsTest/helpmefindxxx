@@ -25,6 +25,8 @@
 // prove nothing about semantic matching.
 
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 
 const PREFIX = 'seed_';
@@ -41,7 +43,7 @@ const CITIES = {
 // expect: 'match' → a real counterpart exists in this pool
 //         'none'  → nobody here fits; a full page of recommendations is noise
 //         'filler'→ background population, makes the random baseline steadier
-const PEOPLE = [
+export const PEOPLE = [
   // --- pair 1: research ↔ capital (sf / sf, same cluster) ---
   { h: 'ml_researcher', city: 'sf', expect: 'match',
     self: 'I train large neural networks and publish deep learning research at a university lab.',
@@ -114,7 +116,7 @@ const PEOPLE = [
 // Accepted connections — drawn between real pairs so the map's edges mean
 // something. Two are same-cluster (must NOT render as a line) and three
 // cross cities (must render).
-const CONNECT = [
+export const CONNECT = [
   ['ml_researcher', 'ai_vc'],       // both sf → intra-cluster, edge dropped
   ['has_spare_room', 'relocating'], // both nyc → intra-cluster, edge dropped
   ['pixel_artist', 'gameplay_dev'], // sf ↔ tokyo
@@ -329,8 +331,17 @@ const main = async () => {
   await connect(keys, ids);
 };
 
-main().catch((e) => {
-  console.error('\nFailed:', e.message);
-  console.error('If handles already exist, run with --clean first.');
-  process.exit(1);
-});
+// Only run when invoked directly. PEOPLE / CONNECT are the ground truth for
+// every calibration measurement in this repo, so other scripts import them
+// rather than keeping a second copy — a duplicated pairing table that drifts
+// would not fail, it would quietly measure the wrong thing.
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  main().catch((e) => {
+    console.error('\nFailed:', e.message);
+    console.error('If handles already exist, run with --clean first.');
+    process.exit(1);
+  });
+}
