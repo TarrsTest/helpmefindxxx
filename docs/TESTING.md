@@ -95,6 +95,7 @@ above.
 | Contact gating | `tests/contact.test.ts` | ✅ done — 4 connection states + 2 leak paths |
 | Pagination & anchor | `tests/pagination.test.ts` | ✅ done — cursor invariants + cutoff anchor |
 | Rate limiting | `tests/rateLimit.test.ts` | ✅ done — threshold, window bucket, per-key isolation |
+| Scoring telemetry | `tests/telemetry.test.ts` | ✅ done — component storage, direction, reconstruction, responder kind, non-exposure |
 
 `tests/auth.test.ts` covers the auth gate only: absent header, header without
 the `Bearer` prefix, `Bearer` with no key, a well-formed but forged key, a
@@ -162,6 +163,28 @@ stubs the env and calls `vi.resetModules()` **before** dynamically importing
 the route. One test asserts the stub took effect — otherwise a broken stub
 falls back to 60/minute and every over-limit case fails looking like a
 limiter bug rather than a harness bug.
+
+`tests/telemetry.test.ts` covers what `007_match_telemetry.sql` records on a
+connection: that both similarities, the geo factor and the weights in effect
+are stored; that each similarity is stored in its own direction; that the
+parts still reconstruct `match_score`; that a declared responder kind is kept
+and an undeclared one stays null; that an unknown kind is refused *without*
+changing the connection; and that none of these columns reach
+`GET /v1/connections` or `/v1/graph`.
+
+**This file uses an ASYMMETRIC embedding stub, and that is load-bearing.**
+The other suites map every text to the same unit vector, which is right for
+them — but it makes `sim_a` and `sim_b` both 1.0, so a route that wrote one
+direction into both columns, or swapped them, would pass. Here each text is
+placed at a chosen angle in the dim-0/dim-1 plane, so each similarity is a
+predicted value rather than an observed one, and the two differ by ~0.81.
+
+The direction test earns its place: with `w1 = w2 = 0.5` a swap leaves
+`w1·sim_a + w2·sim_b` unchanged, so the reconstruction assertion passes on
+swapped data. Verified by mutation — swapping the two fields in the route
+fails the direction test alone, with the other eight still green. Once the
+weights are actually tuned apart, a swap would silently mis-rank every
+recommendation, which is the failure this pins down.
 
 The bucket-alignment test is the one deliberately white-box assertion in the
 suite. It exists because a limiter that dropped the bucket arithmetic and
