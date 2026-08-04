@@ -4,6 +4,7 @@
 //   node scripts/seed-demo.mjs            seed, connect, then probe
 //   node scripts/seed-demo.mjs --probe    re-measure without re-seeding
 //   node scripts/seed-demo.mjs --clean    remove everything this script made
+//   …  --fillers 120                      add background people (additive)
 //   …  --base http://localhost:3007       point at a different dev server
 //
 // Why it goes through the API rather than inserting rows: profiles must be
@@ -310,10 +311,124 @@ const probe = async (keys) => {
   }
 };
 
+// Seed the background population from fillers.mjs. ADDITIVE by design: it
+// leaves the ground-truth people and their edges alone, so it can enlarge a
+// pool that is already seeded. Handles carry the same PREFIX, so --clean
+// removes fillers along with everything else this script made.
+//
+// Fillers exist to give the random-stranger baseline something to average
+// over. The measurement that needs them (MATCH_BASELINE_SAMPLE) is
+// meaningless while the pool is smaller than the sample: score_baseline does
+// `limit <sample>`, so on an 18-person pool asking for 18, 50 or 200 returns
+// one identical number.
+//
+// Their api_keys are deliberately NOT written to .seed-keys.json. Fillers are
+// never probed — they are background, not probands — so persisting 120 more
+// credentials to disk would buy nothing and widen the blast radius of that
+// file.
+// Gemini's free tier allows 100 embed_content requests per minute, and
+// /v1/profile spends exactly one per person (self and seeking go in a single
+// batched call). Seeding flat out therefore hits a 429 partway through — the
+// provider asks for a ~47s wait, which outlasts the client's retry budget and
+// surfaces as a 500. Pacing at 700ms is ~85/min: under the ceiling with room
+// for the request itself, and the whole 120 still takes under two minutes.
+// This is a RATE limit, not a cost one; the total spend is 120 requests.
+const PACE_MS = 700;
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const seedFillers = async (count) => {
+  const { FILLERS } = await import('./fillers.mjs');
+  const chosen = FILLERS.slice(0, Math.min(count, FILLERS.length));
+  if (count > FILLERS.length) {
+    console.log(`Only ${FILLERS.length} fillers are written; seeding all of them.`);
+  }
+
+  // A run that dies between creating a user and writing its profile leaves a
+  // user with no embeddings: invisible to matching, but holding its handle, so
+  // the 409 skip below cannot repair it (the api_key is only returned at
+  // creation). This REPORTS that state and does not act on it.
+  //
+  // An earlier version deleted such rows automatically and destroyed the whole
+  // seeded dataset: it detected them with a PostgREST embedded select whose
+  // result shape did not match the assumption, every row evaluated as
+  // profile-less, and a delete scoped to "orphans" became a delete of
+  // everything with this prefix. The lesson kept here is not "write the query
+  // correctly" but that an unrequested repair step should not be able to
+  // delete anything — a misread on a check nobody asked for should cost a
+  // warning, not the data. Recovery is `--clean` then a fresh seed, run
+  // deliberately.
+  const db = admin();
+  const { data: withProfiles } = await db.from('profiles').select('user_id');
+  const embedded = new Set((withProfiles ?? []).map((p) => p.user_id));
+  const { data: seeded } = await db
+    .from('users')
+    .select('id, handle')
+    .like('handle', `${PREFIX}%`);
+  const orphans = (seeded ?? []).filter((u) => !embedded.has(u.id));
+  if (orphans.length) {
+    console.log(
+      `!! ${orphans.length} seeded user(s) have no profile, left over from an\n` +
+        '   interrupted run. They are inert but hold their handles, so this run\n' +
+        '   will skip them. To start clean: node scripts/seed-demo.mjs --clean\n',
+    );
+  }
+
+  // Spread across every city, 'nowhere' included, so the geo distribution
+  // stays as varied as the text does.
+  const cityNames = Object.keys(CITIES);
+  let done = 0;
+  let skipped = 0;
+
+  for (const [i, f] of chosen.entries()) {
+    const loc = CITIES[cityNames[i % cityNames.length]];
+    let created;
+    try {
+      created = await api('/users', {
+        method: 'POST',
+        body: {
+          handle: PREFIX + f.h,
+          contact: { email: `${f.h}@example.invalid` },
+          ...(loc ? { lat: loc.lat, lng: loc.lng, loc_precision: 5 } : {}),
+        },
+      });
+    } catch (e) {
+      // Already present from an earlier partial run — skip rather than abort,
+      // so a rerun after a rate-limit stall tops the pool up instead of
+      // starting over.
+      if (/409|already/i.test(e.message)) {
+        skipped += 1;
+        continue;
+      }
+      throw e;
+    }
+
+    await api('/profile', {
+      method: 'POST',
+      key: created.api_key,
+      body: { self: f.self, seeking: f.seeking },
+    });
+    done += 1;
+    if (done % 20 === 0) process.stdout.write(`  ${done} seeded …\n`);
+    await pause(PACE_MS);
+  }
+
+  console.log(`\nSeeded ${done} filler profiles${skipped ? ` (${skipped} already existed)` : ''}.`);
+};
+
 // --- main -------------------------------------------------------------
 
 const main = async () => {
   if (flag('clean')) return clean();
+
+  if (flag('fillers')) {
+    const n = Number(arg('fillers', '120'));
+    if (!Number.isFinite(n) || n < 1) {
+      console.error('--fillers needs a positive count, e.g. --fillers 120');
+      process.exit(1);
+    }
+    console.log(`Seeding ${n} background profiles against ${BASE} …`);
+    return seedFillers(n);
+  }
 
   if (flag('probe')) {
     const saved = loadKeys();

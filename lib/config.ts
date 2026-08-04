@@ -22,30 +22,46 @@ export const MATCH_HALF_LIFE_KM = process.env.MATCH_HALF_LIFE_KM
 // result set is comparable either way.
 // Set to 0 (or a negative number) to return the full ranked list.
 //
-// Re-validated 2026-08-04 on the 18-profile ground-truth population
-// (`node scripts/validate-cutoff.mjs`, w1 = w2 = 0.5). The true counterpart
-// ranked #1 for 10/10 probands, standing 0.1201-0.2452 above the best
-// impostor — reproducing the 0.12-0.24 range the original 2026-07-28 figure
-// came from, on an independent ground-truth set.
+// LOWERED 0.15 → 0.10 on 2026-08-04. THIS VALUE IS POOL-SIZE DEPENDENT, which
+// is the most important thing to know about it — see the last paragraph before
+// changing it.
 //
-// KEPT AT 0.15 rather than tightened, deliberately. 0.15 sits INSIDE that
-// separation range, so on the two lowest-separation probands a stranger or
-// two rides along with the real match: a match page averages 2.6 rows at
-// 0.15 versus 1.0 at any cutoff below 0.1201. Tightening to ~0.12 would
-// isolate the true match perfectly on this dataset — and that is exactly why
-// it isn't done. Every proband here has exactly ONE counterpart and it always
-// ranked first, so this population is structurally unable to show what a
-// tight cutoff costs when someone has two plausible matches or the real one
-// lands at rank 2. Dropping a genuine match is a worse failure than showing
-// one extra stranger the agent can rank past, so the cutoff keeps its
-// headroom until a population with multi-counterpart people can measure it.
+// Measured with `node scripts/validate-cutoff.mjs` (w1 = w2 = 0.5), first on
+// the 18-profile ground-truth cast and then again after scripts/fillers.mjs
+// took the pool to 138. The true counterpart ranked #1 for 10/10 probands both
+// times, but its distance from the best impostor shrank:
 //
-// What the measurement DOES pin down: noise pages stay full (17 rows) at
-// every cutoff at or above 0.08, while match pages stay short. Page length
-// is therefore itself a signal, and that property holds across the range —
-// it is not what the exact value is buying.
+//   pool   separation (min-max)   rows on a match page at 0.15
+//     18   0.1201 - 0.2452        2.6
+//    138   0.0814 - 0.2071        12.1
+//
+// More strangers means a better best-stranger, so the gap the cutoff has to
+// fit inside closes as the pool grows. At 138 people, 0.15 was letting about
+// eleven impostors ride along with each real match, and the "short page means
+// a real match" property — a match page of 12 against a noise page of 137 —
+// had lost most of its contrast. At 0.10 a match page is 1.2 rows against 125.
+//
+// 0.10 rather than 0.08: 0.08 isolates the counterpart perfectly here, but the
+// smallest separation measured was 0.0814, so 0.08 is fitted to the exact edge
+// of one sample. 0.10 keeps a margin above that edge while still costing only
+// ~0.2 impostor rows per page.
+//
+// The unmeasured risk is unchanged and still argues against going tighter:
+// every proband in this population has exactly ONE counterpart and it always
+// ranked first, so nothing here can show what a tight cutoff costs when
+// someone has two plausible matches or the real one lands at rank 2. Dropping
+// a genuine match is the worse failure.
+//
+// THE STRUCTURAL POINT: separation fell by a third when the pool grew 8×, and
+// there is no reason to expect it to stop. Any fixed constant here is tuned to
+// the pool it was measured on and will be wrong at the next order of
+// magnitude. The durable fix is to derive the cutoff from something that
+// scales with the population — the baseline spread from score_baseline is
+// already computed on every request and is the obvious candidate — rather than
+// re-deriving this number by hand each time the pool grows. Treat 0.10 as the
+// current best fixed value, not as settled.
 export const MATCH_RELATIVE_CUTOFF = Number(
-  process.env.MATCH_RELATIVE_CUTOFF ?? 0.15,
+  process.env.MATCH_RELATIVE_CUTOFF ?? 0.1,
 );
 
 // How many random profiles to score for the calibration baseline returned
@@ -53,26 +69,31 @@ export const MATCH_RELATIVE_CUTOFF = Number(
 // request; the pool is scored in one RPC, so this is one extra query either
 // way. Set to 0 to skip the baseline entirely.
 //
-// STILL UNVALIDATED, and not validatable yet — stated plainly so nobody
-// mistakes it for a measured number. `score_baseline` takes `limit
-// <sample>` over the whole profiles table, so once the sample reaches the
-// pool size it is scoring everyone and further increases change nothing.
-// Measured 2026-08-04 against the 18-profile dev pool:
+// VALIDATED 2026-08-04 at 138 profiles — keep 50.
 //
-//   requested   5      10      18      50     200
-//   actual      5      10      17      17      17
-//   baseline    0.5488 0.5328  0.5223  0.5223  0.5223
-//   stddev      0.0705 0.0545  0.0448  0.0448  0.0448
+// This could not be measured while the pool was 18: `score_baseline` does
+// `limit <sample>`, so every sample size at or above the pool size drew the
+// same 17 rows and returned an identical number. scripts/fillers.mjs took the
+// pool to 138, which makes 50 a real sample again.
 //
-// 18, 50 and 200 are the same measurement. Whether 50 is the right number
-// is a question about how fast the baseline converges in a pool of
-// thousands, and it cannot be answered by a pool of 18 — it needs a filler
-// population several times larger than the sample, which costs one
-// embedding call per profile. Until then 50 is a guess that is cheap and
-// has not misbehaved, not a validated default.
+// The question is not "what is the baseline" — one call answers that — but
+// how far the answer MOVES between calls, since each draws a different sample.
+// That spread is the error bar on every top_margin the API reports.
+// `node scripts/baseline-convergence.mjs`, 25 repeats per size:
+//
+//   sample     5       10       25       50      100      137
+//   spread  0.0138   0.0078   0.0045   0.0028   0.0016   0.0000
+//
+// Textbook 1/√n, and the 137 column is saturation (nothing left to draw), not
+// accuracy. The distance this number has to resolve is the gap between the
+// weakest true match and the strongest noise case, measured at 0.0755 on this
+// pool. At a sample of 50 the spread is 27× smaller than that gap; at 100 it
+// is 47× for double the work. 50 is comfortably past the point where more
+// sampling buys anything worth having.
 export const MATCH_BASELINE_SAMPLE = Number(
   process.env.MATCH_BASELINE_SAMPLE ?? 50,
 );
+
 
 // Per-key rate limit (SPEC §7.2): requests per window.
 export const RATE_LIMIT = Number(process.env.RATE_LIMIT ?? 60);

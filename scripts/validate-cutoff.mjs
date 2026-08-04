@@ -89,29 +89,55 @@ const main = async () => {
     );
     process.exit(1);
   }
-  console.log(`Pool: ${pool.length} profiles · weights w1=${W1} w2=${W2}\n`);
 
-  // Score every proband against the whole rest of the pool.
+  // Candidates are EVERY seeded profile, not just the ground-truth cast. The
+  // separation a cutoff has to clear is the distance from the true
+  // counterpart down to the best impostor, and the more strangers there are,
+  // the better the best impostor tends to be — so measuring against the
+  // 18-person cast would report a separation the real pool never offers.
+  const candidates = pool.map((u) => ({ h: u.handle.slice(PREFIX.length), id: u.id }));
+  console.log(
+    `Pool: ${pool.length} profiles (${candidates.length} candidates) · weights w1=${W1} w2=${W2}\n`,
+  );
+
+  // Bounded concurrency: one RPC per ordered pair is ~1.6k calls at this pool
+  // size, which is slow serially and rude in parallel.
+  const mapLimit = async (items, limit, fn) => {
+    const out = new Array(items.length);
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(limit, items.length) }, async () => {
+        for (;;) {
+          const i = next++;
+          if (i >= items.length) return;
+          out[i] = await fn(items[i]);
+        }
+      }),
+    );
+    return out;
+  };
+
   const probands = PEOPLE.filter((p) => p.expect !== 'filler');
   const results = [];
 
   for (const p of probands) {
     const me = idOf.get(p.h);
-    const scored = [];
-    for (const other of PEOPLE) {
-      if (other.h === p.h) continue;
+    const others = candidates.filter((c) => c.h !== p.h);
+    const scoredRaw = await mapLimit(others, 8, async (other) => {
       const { data, error: e } = await db.rpc('pair_scoring', {
         p_a: me,
-        p_b: idOf.get(other.h),
+        p_b: other.id,
         p_w1: W1,
         p_w2: W2,
         p_half_life_km: HALF_LIFE,
       });
       if (e) throw e;
       const row = (data ?? [])[0];
-      if (row) scored.push({ h: other.h, score: row.match_score });
-    }
+      return row ? { h: other.h, score: row.match_score } : null;
+    });
+    const scored = scoredRaw.filter(Boolean);
     scored.sort((a, b) => b.score - a.score);
+    process.stdout.write(`  scored ${p.h} against ${scored.length} candidates\n`);
 
     const partner = partnerOf.get(p.h) ?? null;
     const partnerRow = partner ? scored.find((s) => s.h === partner) : null;
