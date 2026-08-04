@@ -83,13 +83,19 @@ export const POST = (request: Request) =>
       .maybeSingle();
     if (existing) throw new ApiError(409, 'connection already exists');
 
-    const { data: score } = await db.rpc('pair_score', {
+    // Components as well as the total: the composed score can't be pulled
+    // apart later, so w1 / w2 can only be fitted from accept outcomes if
+    // sim_a and sim_b are recorded now (007_match_telemetry.sql).
+    const { data: scoring } = await db.rpc('pair_scoring', {
       p_a: userId,
       p_b: targetId,
       p_w1: MATCH_W1,
       p_w2: MATCH_W2,
       p_half_life_km: MATCH_HALF_LIFE_KM,
     });
+    const s = (scoring ?? [])[0] as
+      | { match_score: number; sim_a: number; sim_b: number; geo_factor: number }
+      | undefined;
 
     const { data: conn, error } = await db
       .from('connections')
@@ -97,7 +103,15 @@ export const POST = (request: Request) =>
         requester_id: userId,
         target_id: targetId,
         status: 'pending',
-        match_score: score ?? null,
+        match_score: s?.match_score ?? null,
+        sim_a: s?.sim_a ?? null,
+        sim_b: s?.sim_b ?? null,
+        geo_factor: s?.geo_factor ?? null,
+        // The weights this edge was scored under — without them a row
+        // scored at 0.5/0.5 is indistinguishable from one scored after a
+        // retune, and the fit would mix two different rankings.
+        w1: MATCH_W1,
+        w2: MATCH_W2,
       })
       .select('id, status, match_score, created_at')
       .single();
