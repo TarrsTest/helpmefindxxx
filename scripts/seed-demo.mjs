@@ -235,10 +235,16 @@ const connect = async (keys, ids) => {
       key: keys[a],
       body: { target_id: ids[b] },
     });
+    // Declare the responder truthfully: this script accepts on its own,
+    // with no human in the loop. Leaving it undeclared would park these
+    // accepts in the same `responder_kind is null` bucket as real traffic
+    // that simply didn't label itself, and w1 / w2 fitted on the union
+    // would be tuned partly to this file's hard-coded pairings. Declaring
+    // it makes seeded outcomes excludable with a WHERE clause.
     await api(`/connections/${connection.id}/respond`, {
       method: 'POST',
       key: keys[b],
-      body: { action: 'accept' },
+      body: { action: 'accept', responder: 'agent' },
     });
     process.stdout.write(`  ${a} ↔ ${b} accepted\n`);
   }

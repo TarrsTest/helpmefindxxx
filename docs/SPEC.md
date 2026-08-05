@@ -120,16 +120,26 @@ agent 转述给用户是最自然的动作，数字嵌在里面就等于每转�
 而"安全用法"同时也是"最顺手的用法"，不再依赖 agent 记得改写。
 
 **`match_score` 只是排序信号，不是匹配概率。** embedding 的余弦相似度有很高的
-地板——两个毫无关系的人也有 0.55~0.62 分（gemini-embedding-001，2026-07-28 实测）。
-所以 0.6 的含义是"陌生人"，不是"60% 匹配"。推论有三条：
+地板——两个毫无关系的人平均也有 ~0.50 分，同一页里最强的陌生人能到 ~0.58
+（gemini-embedding-001，138 人池，2026-08-05 实测）。所以 0.58 的含义是"陌生人"，
+不是"58% 匹配"。**这个地板随池子规模移动**（见下方第 2 条），引用时必须带上池子
+大小。推论有三条：
 
 1. **不设绝对阈值**。改用**相对截断**：比本结果集最高分低 `MATCH_RELATIVE_CUTOFF`
-   （默认 0.15）以上的候选直接丢掉。锚点是第一页的最高分，随 cursor 带到后续页，
+   （默认 0.10）以上的候选直接丢掉。锚点是第一页的最高分，随 cursor 带到后续页，
    否则第 2 页会拿自己那个更低的 top 重新锚定，把第 1 页刚滤掉的人放回来。
 2. **相对截断挡不住"整页都不相干"**——top 本身就是噪音时，"比 top 低多少"没有意义。
    所以返回体附带 `calibration`：把最高分和**随机陌生人基线**（随机采样 profile 打分
-   的均值）做差，`top_margin` 就是给 agent 的判断依据。实测：真配对约 0.18，
-   池子里没有相关的人约 0.036——而后者照样会收到满满一页推荐。
+   的均值）做差，`top_margin` 就是给 agent 的判断依据。138 人池实测（2026-08-05）：
+   真配对 0.1492–0.2791，池子里没有相关的人最高到 0.0756——而后者照样会收到满满
+   一页推荐。
+
+   **`top_margin` 的阈值是池子规模的函数，不是常数。** baseline 是"对随机陌生人"
+   的分，池子越大它越低，于是信号和噪音的 margin 一起上移。18 人池时噪音上限
+   0.058、判据是 `≥0.14 / ≤0.06`；扩到 138 人后同一批"无配对"的人测出 ~0.075，
+   直接冲破旧的噪音上限。现行判据 `≥0.13 / ≤0.09` 校准于 138 人池，
+   见 `skills/helpmefind/SKILL.md` §1——**扩池后必须重测**，且引用这组数时
+   永远要连池子大小一起写。
 3. **分数不给人看**。`match_score` 只出现在 agent 面向的 `/v1` 返回体里；
    地图（`/map`、`/v1/graph`）不显示任何分数。
 
@@ -207,11 +217,16 @@ A 发起 → pending → B 的 agent respond
 
 ## 9. v0 交付清单（骨架优先级）
 
-- [ ] Schema + migration（含 pgvector 扩展）
-- [ ] API key 签发 + hash 校验中间件 + 限流
-- [ ] Embedding provider interface + 一个实现
-- [ ] `POST /v1/profile`（写入 + re-embed）
-- [ ] `GET /v1/recommendations`（双向打分 + cursor 分页）
-- [ ] connections 状态机 4 个端点
-- [ ] `GET /v1/graph`（模糊化输出）
-- [ ] 地图前端页面
+v0 骨架已全部交付（核对于 2026-08-05）：
+
+- [x] Schema + migration（含 pgvector 扩展）— `001`–`007`
+- [x] API key 签发 + hash 校验中间件 + 限流 — `lib/api/auth.ts`
+- [x] Embedding provider interface + 一个实现 — `lib/embeddings/`，Gemini / Voyage / 本地降级三实现
+- [x] `POST /v1/profile`（写入 + re-embed）
+- [x] `GET /v1/recommendations`（双向打分 + cursor 分页 + `calibration`）
+- [x] connections 状态机 — 3 个端点（`POST` / `GET /v1/connections`、`POST /v1/connections/:id/respond`）+ 过期清扫走 pg_cron（`004`），不是端点
+- [x] `GET /v1/graph`（模糊化输出）
+- [x] 地图前端页面 — `app/map/` + `components/GraphMap.tsx`
+
+骨架之外后加的：距离衰减（`003`）、baseline 校准（`005`）、游标精度（`006`）、
+匹配遥测（`007`）、`POST /v1/admin/reembed`（换 provider 后全量重嵌）。
