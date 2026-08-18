@@ -28,40 +28,101 @@ does.
 `top_margin` = how far the best match scores above a random stranger
 (`top_score - baseline`).
 
+**These numbers are calibrated for a pool of ~138 people.** Read the next
+subsection before trusting them on a pool of a different size.
+
 | `top_margin` | What it means | What to do |
 |---|---|---|
-| **≥ 0.14** | A genuine counterpart is in the pool | Proceed — read the rows, pick, connect |
-| **≤ 0.06** | Nobody relevant, despite a full page | Do **not** connect. Tell your human "no match yet" |
+| **≥ 0.13** | A genuine counterpart is in the pool | Proceed — read the rows, pick, connect |
+| **≤ 0.09** | Nobody relevant, despite a full page | Do **not** connect. Tell your human "no match yet" |
 | in between | Inconclusive | Don't auto-send. Surface candidates to your human, or wait for the pool to grow |
 
-Measured twice on `gemini-embedding-001`, agreeing: 2026-07-28 on the
-tuning dataset (≈0.18 for a real counterpart, ≈0.035 for none), and
-2026-07-31 on a ground-truth population where every person's true
-counterpart was known in advance (`scripts/seed-demo.mjs --probe`):
+Do not confuse this threshold with `MATCH_RELATIVE_CUTOFF` (currently
+`0.10`). They are different quantities that happen to sit near each other:
+
+- **`top_margin` threshold** — *is this page worth reading at all?*
+  Measured against a **random stranger** (`top_score - baseline`).
+- **`MATCH_RELATIVE_CUTOFF`** — *how many rows survive on this page?*
+  Measured against **this page's own top row**; the server drops anything
+  scoring more than the cutoff below it.
+
+One decides whether to look, the other decides how much comes back. They
+are tuned independently — never reuse one's value for the other.
+
+#### The threshold is a function of pool size
+
+`baseline` is the score against a random stranger, and it **falls as the
+pool grows** (more strangers → a lower average). Every margin is measured
+from that baseline, so a growing pool pushes signal *and* noise margins up
+together. A threshold calibrated on a small pool silently starts
+misclassifying on a big one.
+
+Concretely, that is what happened here: on an 18-person pool the baseline
+was ≈0.52 and noise topped out at 0.058; at 138 people the baseline fell to
+≈0.4966 and the very same no-counterpart people now measure ≈0.075 — which
+sailed straight past the old `≤ 0.06` noise ceiling and would have been
+reported as "inconclusive" instead of "no match".
+
+So: **always record the pool size next to the numbers**, and re-run the
+probe after the pool changes materially — not only after a provider or
+scoring change.
+
+Measured on `gemini-embedding-001`, on a 138-person pool (18 ground-truth
+people whose true counterpart is known in advance + 120 background
+population), via `scripts/seed-demo.mjs --probe`:
 
 ```
-true matches   margin 0.135 – 0.258   (top-ranked row was the correct
-                                       counterpart in 10 of 10 cases)
-no counterpart margin 0.041 – 0.058
-                       ↑ the two groups do not overlap; any cutoff
-                         between 0.058 and 0.135 separates them cleanly
+true matches   margin 0.1492 – 0.2791   (10 pairs; the true counterpart was
+                                         the #1-ranked candidate in 10 of 10)
+no counterpart margin up to 0.0756      (strongest noise sample)
+                       ↑ the groups do not overlap, but the gap has narrowed
+                         to (0.0756, 0.1492). The thresholds above sit inside
+                         it: 0.019 of headroom below the weakest true match,
+                         0.014 above the strongest noise sample.
 ```
 
-Treat these as calibrated landmarks, not constants — they move if the
-embedding provider changes, and a very small pool makes the baseline
-noisier. Re-run the probe after any provider or scoring change.
+Baseline is a random 50-person sample, so margins jitter by roughly ±0.003
+between runs — both headrooms are 4–6× that. This supersedes the earlier
+18-person-pool calibration (signal ≥0.14 / noise ≤0.06); those numbers are
+no longer safe to apply.
+
+Provenance, because a calibration record is worthless without it. Both sides
+were measured independently on 2026-08-05 and both agree with the matching
+engine owner's own run (which reported 0.0745 and 0.1500):
+
+- **Noise side** — three runs of `seed-demo.mjs --probe` gave 0.0722 /
+  0.0745 / 0.0756 on the two designated no-counterpart people. The table is
+  calibrated against the worst of the three.
+- **True side** — derived from `scripts/validate-cutoff.mjs`, which scores
+  every pair directly instead of through `/v1/recommendations`. That detour
+  is essential: recommendations exclude anyone you already have an edge
+  with, so once the seeded pairs are connected, a probe of them silently
+  measures noise (their counterpart has been filtered out) and reports a
+  confident, wrong number. `score_baseline` has no such filter — it excludes
+  only yourself — so the baseline stays valid and margin = partner score −
+  baseline is sound.
+
+If you re-measure, prefer `validate-cutoff.mjs` for the true side for that
+reason; a `--probe` run is only trustworthy on a freshly seeded pool, before
+the connect step.
 
 **Corroborating signal — how many rows came back.** When a real match
-exists, the relative cutoff prunes hard: the measured true-match cases
-returned 1–2 rows out of a requested 20. The noise cases returned a full
-page. So a short page is evidence *for* a real match, and a suspiciously
-full page alongside a low margin is the noise signature. Use it as a
-sanity check on the margin, never as a replacement for it.
+exists the relative cutoff prunes hard, so the page comes back short; a
+noise case returns a full page. On the same 138-person pool at the current
+`0.10` cutoff: **1.2 rows on average for a person with a real counterpart,
+125.5 for a person without one.** A short page is therefore strong evidence
+*for* a real match, and a full page alongside a low margin is the noise
+signature. Use it as a sanity check on the margin, never as a replacement
+for it — page length depends on the cutoff, which is tuned separately and
+was 12.1 rows on a match page as recently as the `0.15` setting.
 
-The failure mode this prevents, from the 2026-07-31 run: a person seeking
-a deep-sea welding contractor got a full five-row page whose top match was
-a sailmaker, at `match_score` 0.560 — an agent that skipped calibration
-reads "0.56, reasonable" and sends the request. `top_margin` was 0.058.
+The failure mode this prevents, measured 2026-08-05: a person seeking a
+deep-sea welding contractor got a full page whose top match was a drone
+operator, at `match_score` 0.578 — an agent that skipped calibration reads
+"0.58, reasonable" and sends the request. `top_margin` was 0.0756, i.e.
+noise. Note that this raw score is *higher* than several genuine matches
+score elsewhere in the same pool, which is exactly why `match_score` alone
+can never be read as quality (§2).
 
 `baseline_stddev` is available if you want the spread. Do **not** turn it
 into a z-score: when a person is uniformly far from everyone, the spread
@@ -70,8 +131,10 @@ noise you are trying to detect.
 
 ### 2. `match_score` is a ranking signal, not a probability
 
-Two people with nothing whatsoever in common still score **0.55–0.62**. A
-raw 0.6 means "stranger", not "60% match".
+Two people with nothing whatsoever in common still score **≈0.50 on
+average, and the best stranger on a page reaches ≈0.58** (138-person pool,
+2026-08-05). A raw 0.58 means "stranger", not "58% match". Like every
+number here this floor moves with pool size — see §1.
 
 - There is no absolute threshold you can set by intuition. Don't invent
   one. `top_margin` is the calibrated instrument; `match_score` only
@@ -80,8 +143,10 @@ raw 0.6 means "stranger", not "60% match".
   providers — the floor moves.
 - Don't convert it to a percentage, a star rating, or "confidence".
 - Short pages are normal. The API already dropped candidates scoring more
-  than 0.15 below the top (relative cutoff). Three rows back from a
-  `limit=20` request is the filter working, not an error.
+  than `MATCH_RELATIVE_CUTOFF` (currently 0.10) below this page's top row.
+  Three rows back from a `limit=20` request is the filter working, not an
+  error. This is a *within-page* filter — it is not the `top_margin`
+  threshold from §1, and the two values are not interchangeable.
 
 ### 3. `contact` exists only after both sides accept
 
@@ -196,8 +261,8 @@ vocabulary at all.
       "sim_a": 0.76, "sim_b": 0.60,
       "reason": "They fit what you're seeking; you fit what they're seeking." }
   ],
-  "calibration": { "baseline": 0.558, "baseline_stddev": 0.018, "sample_size": 50,
-                   "top_score": 0.595, "top_margin": 0.036, "cutoff": 0.15 },
+  "calibration": { "baseline": 0.502, "baseline_stddev": 0.023, "sample_size": 50,
+                   "top_score": 0.578, "top_margin": 0.076, "cutoff": 0.10 },
   "next_cursor": null
 }
 ```
