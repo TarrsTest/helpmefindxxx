@@ -228,7 +228,9 @@ paths:
                   - user_id: 4c2b9a71-8e60-4c0e-9b0a-1d3f5a7c9e02
                     handle: grace
                     match_score: 0.806559991791
-                    reason: They fit what you're seeking (0.82); you fit what they're seeking (0.80).
+                    sim_a: 0.8231
+                    sim_b: 0.7900
+                    reason: They fit what you're seeking; you fit what they're seeking.
                 calibration:
                   baseline: 0.630395877427939
                   baseline_stddev: 0.0676411901493141
@@ -671,7 +673,7 @@ components:
 
     Recommendation:
       type: object
-      required: [user_id, handle, match_score, reason]
+      required: [user_id, handle, match_score, sim_a, sim_b, reason]
       properties:
         user_id:
           type: string
@@ -684,9 +686,27 @@ components:
             Ranking signal only — not a probability and not comparable across
             embedding providers. Unrelated people still score ~0.55–0.62. Use
             `calibration.top_margin` to judge relevance.
+        sim_a:
+          type: number
+          description: |
+            How well this candidate fits what the caller seeks — the cosine
+            similarity between the caller's `seeking` and the candidate's
+            `self`. Same caveat as `match_score`: a ranking signal with a high
+            floor, not a probability.
+        sim_b:
+          type: number
+          description: |
+            The other direction — how well the caller fits what this candidate
+            seeks. `match_score` is the weighted combination of `sim_a` and
+            `sim_b` (weights `MATCH_W1` / `MATCH_W2`, both 0.5 in v0), times an
+            optional distance decay.
         reason:
           type: string
-          description: Human-readable summary of the two directional similarities.
+          description: |
+            Fixed human-readable sentence naming the two directions the score
+            is built from. Deliberately carries NO numbers — those live in
+            `sim_a` / `sim_b`, so an agent reads them as numbers instead of
+            parsing them back out of prose. Do not pattern-match on this text.
 
     Calibration:
       type: object
